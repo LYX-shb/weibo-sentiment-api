@@ -1,0 +1,9 @@
+bert-base-chinese/
+.vscode/
+__pycache__/
+.pytest_cache/
+*.zip
+*.pyc
+*.pt
+*.pth
+*.bin
