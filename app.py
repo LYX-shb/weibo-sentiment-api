@@ -1,8 +1,16 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-from PIL import Image
 import os
+import requests
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+
+def experiment_table(filename):
+    table = pd.read_csv(ROOT / "results" / filename)
+    table["ACC"] = table["ACC"].map(lambda value: f"{value:.2%}")
+    table["F1"] = table["F1"].map(lambda value: f"{value:.4f}")
+    return table
 
 st.set_page_config(page_title="微博情感分析系统", layout="wide")
 
@@ -21,19 +29,21 @@ if page == "📊 项目概览":
     st.header("项目概览")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("数据集总量", "48,374条")
+        total = sum(len(pd.read_csv(path, usecols=[0])) for path in (ROOT / "data").glob("*.csv"))
+        st.metric("仓库数据总量", f"{total:,}条")
     with col2:
         st.metric("情感类别", "6类 → 2类")
     with col3:
-        st.metric("BERT最佳ACC", "95.41%")
+        transfer = pd.read_csv(ROOT / "results/binary_results.csv")
+        st.metric("二分类实验最高ACC", f"{transfer['ACC'].max():.2%}")
     
     st.markdown("""
     ### 研究内容
-    1. **六分类探索**：happy/sad/angry/surprise/fear/neutral（ACC~79%）
+    1. **六分类探索**：happy/sad/angry/surprise/fear/neutral
     2. **二分类优化**：聚焦happy vs angry（ACC~95%）
-    3. **跨领域迁移**：usual↔virus领域自适应分析
-    4. **Focal Loss**：解决类别不平衡问题
-    5. **注意力可视化**：BERT可解释性分析
+    3. **跨领域迁移**：usual↔virus跨域评估
+    4. **Focal Loss**：与标准交叉熵比较实验结果
+    5. **注意力可视化**：辅助观察 token 权重分布
     """)
 
 elif page == "📈 数据分析":
@@ -45,7 +55,7 @@ elif page == "📈 数据分析":
     st.subheader("数据统计")
     data = {
         '数据集': ['usual_train', 'usual_eval', 'usual_test', 'virus_train', 'virus_eval', 'virus_test'],
-        '样本数': [27768, 2000, 5000, 5745, 1237, 2003]
+        '样本数': [len(pd.read_csv(ROOT / 'data' / name, usecols=[0])) for name in ['usual_train.csv', 'usual_eval_labeled.csv', 'usual_test_labeled.csv', 'virus_train.csv', 'virus_eval_labeled.csv', 'virus_test_labeled.csv']]
     }
     st.dataframe(pd.DataFrame(data))
 
@@ -53,30 +63,18 @@ elif page == "🔬 实验结果":
     st.header("实验结果对比")
     
     st.subheader("六分类探索实验")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("TF-IDF+SVM", "66.70%")
-    with col2:
-        st.metric("BERT", "78.93%", "+12.2%")
-    
-    st.subheader("二分类主实验")
-    results_binary = pd.DataFrame({
-        '方法': ['TF-IDF+LR', 'TF-IDF+SVM', 'BERT(标准)', 'BERT+Focal'],
-        'ACC': ['86.42%', '86.88%', '94.54%', '94.97%'],
-        'F1': ['0.8882', '0.8916', '0.9544', '0.9580']
-    })
-    st.table(results_binary)
-    
+    st.caption("以下分别展示仓库中的基线与 BERT 实验记录。")
+    st.table(pd.read_csv(ROOT / "results/baseline_results.csv"))
+    st.table(experiment_table("bert_results_v2.csv"))
+
+    st.subheader("二分类实验")
+    st.caption("TF-IDF 基线与交叉熵/Focal Loss 对比单独展示；F1 以 angry 为正类。")
+    st.table(experiment_table("binary_baseline.csv"))
+    st.table(experiment_table("focal_comparison.csv"))
+
     st.subheader("跨领域迁移分析")
-    transfer = pd.DataFrame({
-        '实验': ['usual→usual', 'virus→virus', 'usual→virus', 'virus→usual'],
-        '训练域': ['通用', '疫情', '通用', '疫情'],
-        '测试域': ['通用', '疫情', '疫情', '通用'],
-        'ACC': ['94.70%', '95.41%', '91.91%', '89.90%'],
-        'F1': ['0.9555', '0.9000', '0.8360', '0.9122']
-    })
-    st.table(transfer)
-    
+    st.table(experiment_table("binary_results.csv"))
+
     st.subheader("训练曲线对比")
     if os.path.exists('results/training_curve_comparison.png'):
         st.image('results/training_curve_comparison.png', use_column_width=True)
@@ -94,40 +92,51 @@ elif page == "🤖 实时预测":
     text_input = st.text_area("输入微博内容：", "今天天气真好，心情特别开心！")
     
     if st.button("预测"):
-        if "开心" in text_input or "哈哈" in text_input:
-            result = "😊 happy"
-            conf = 0.98
-        elif "气" in text_input or "愤怒" in text_input:
-            result = "😠 angry"
-            conf = 0.95
+        if not text_input.strip():
+            st.warning("请输入微博文本。")
         else:
-            result = "😊 happy"
-            conf = 0.75
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("预测结果", result)
-        with col2:
-            st.metric("置信度", f"{conf*100:.1f}%")
-        
-        probs = {'happy': conf if 'happy' in result else 1-conf, 
-                'angry': 1-conf if 'happy' in result else conf}
-        st.bar_chart(probs)
+            api_url = os.getenv("SENTIMENT_API_URL", "http://127.0.0.1:8002/predict")
+            try:
+                response = requests.post(
+                    api_url,
+                    json={"text": text_input.strip()},
+                    timeout=30,
+                )
+                response.raise_for_status()
+                prediction = response.json()
+                label = prediction["label"]
+                confidence = float(prediction["confidence"])
+                if label not in {"happy", "angry"} or not 0 <= confidence <= 1:
+                    raise ValueError("模型接口返回值不符合预期。")
+
+                result = "😊 happy" if label == "happy" else "😠 angry"
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("预测结果", result)
+                with col2:
+                    st.metric("预测类别概率", f"{confidence * 100:.1f}%")
+            except requests.RequestException:
+                st.error("无法连接情感分析 API。请先启动 FastAPI 服务并检查 SENTIMENT_API_URL。")
+            except (KeyError, TypeError, ValueError):
+                st.error("情感分析 API 返回了无效结果，请检查后端服务。")
 
 elif page == "📋 报告总结":
     st.header("报告总结")
-    st.markdown("""
-    ### 核心结论
-    1. **性能达标**：BERT二分类领域内ACC达95.41%，超过92%目标
-    2. **显著优势**：相比传统TF-IDF方法提升8.2个百分点
-    3. **领域特性**：跨领域迁移损失4.14%，疫情情感具有特异性
-    4. **优化有效**：Focal Loss进一步提升难分类样本性能
-    5. **可解释性**：注意力可视化验证模型关注情感关键词
-    
-    ### 创新点
-    - 跨领域迁移实验设计（usual↔virus）
-    - Focal Loss解决类别不平衡
-    - BERT注意力可视化分析
+    focal = pd.read_csv(ROOT / "results/focal_comparison.csv").set_index("方法")
+    standard = focal.loc["标准交叉熵"]
+    improved = focal.loc["Focal Loss"]
+    st.markdown(f"""
+    ### 实验记录
+    - 标准交叉熵：ACC {standard['ACC']:.2%}，angry 类 F1 {standard['F1']:.4f}。
+    - Focal Loss：ACC {improved['ACC']:.2%}，angry 类 F1 {improved['F1']:.4f}。
+    - 同一对比实验中，ACC 提升 {(improved['ACC'] - standard['ACC']) * 100:.2f} 个百分点。
+    - 跨域结果见实验结果页，领域内与跨域指标分开记录。
+    - 注意力热力图用于辅助观察权重分布，不能据此证明模型的因果解释。
+
+    ### 实验范围
+    - happy/angry 二分类与六分类探索。
+    - 通用微博和疫情微博之间的跨域评估。
+    - 本地 FastAPI 推理与 Streamlit 页面展示。
     """)
 
 st.sidebar.markdown("---")

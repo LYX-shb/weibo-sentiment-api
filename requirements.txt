@@ -6,3 +6,10 @@ transformers
 numpy
 pytest
 httpx
+streamlit
+pandas
+matplotlib
+pillow
+requests
+scikit-learn
+tqdm
